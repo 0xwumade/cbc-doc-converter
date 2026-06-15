@@ -9,10 +9,14 @@ class ConverterApp {
         this.selectedFile = null;
         this.isConverting = false;
         this.conversionResult = null;
+        this.maxFileSize = 50 * 1024 * 1024;
+        this.maxFileSizeLabel = '50MB';
         
         this.initializeElements();
         this.attachEventListeners();
         this.setupDragAndDrop();
+        this.updateFileTypeHint();
+        this.loadServerConfig();
     }
 
     /**
@@ -115,17 +119,42 @@ class ConverterApp {
         // Update mode
         this.currentMode = button.getAttribute('data-mode');
 
-        // Update file type hint
-        if (this.currentMode === 'pdf-to-word') {
-            this.fileTypeHint.textContent = 'Supported: PDF files (max 50MB)';
-            this.fileInput.accept = '.pdf';
-        } else {
-            this.fileTypeHint.textContent = 'Supported: Word documents - .docx, .doc (max 50MB)';
-            this.fileInput.accept = '.docx,.doc';
-        }
+        this.updateFileTypeHint();
 
         // Reset form when switching modes
         this.resetForm();
+    }
+
+    /**
+     * Load server-side limits so hosted deployments can advertise their real capacity.
+     */
+    async loadServerConfig() {
+        try {
+            const response = await fetch('/api/config', { cache: 'no-store' });
+            if (!response.ok) return;
+
+            const config = await response.json();
+            if (config.maxFileSize) {
+                this.maxFileSize = config.maxFileSize;
+                this.maxFileSizeLabel = this.formatFileSize(config.maxFileSize);
+                this.updateFileTypeHint();
+            }
+        } catch (error) {
+            console.log('Could not load server config:', error);
+        }
+    }
+
+    /**
+     * Update upload guidance for the selected conversion mode.
+     */
+    updateFileTypeHint() {
+        if (this.currentMode === 'pdf-to-word') {
+            this.fileTypeHint.textContent = `Supported: PDF files (max ${this.maxFileSizeLabel})`;
+            this.fileInput.accept = '.pdf';
+        } else {
+            this.fileTypeHint.textContent = `Supported: Word documents - .docx, .doc (max ${this.maxFileSizeLabel})`;
+            this.fileInput.accept = '.docx,.doc';
+        }
     }
 
     /**
@@ -146,10 +175,8 @@ class ConverterApp {
             return;
         }
 
-        // Validate file size (50MB max)
-        const maxSize = 50 * 1024 * 1024;
-        if (file.size > maxSize) {
-            this.showStatus('error', 'File is too large. Maximum size is 50MB.');
+        if (file.size > this.maxFileSize) {
+            this.showStatus('error', `File is too large. Maximum size is ${this.maxFileSizeLabel}.`);
             return;
         }
 
@@ -265,11 +292,14 @@ class ConverterApp {
         formData.append('file', this.selectedFile);
         formData.append('mode', this.currentMode);
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 55000);
+
         try {
-            // Call Python backend API
             const response = await fetch('/api/convert', {
                 method: 'POST',
-                body: formData
+                body: formData,
+                signal: controller.signal
             });
 
             if (!response.ok) {
@@ -288,7 +318,33 @@ class ConverterApp {
             const blob = await response.blob();
             return { blob, filename };
         } catch (error) {
+            if (error.name === 'AbortError') {
+                throw new Error('Conversion timed out. Try a smaller or simpler file.');
+            }
+
+            if (error instanceof TypeError) {
+                throw new Error(await this.getNetworkErrorMessage());
+            }
+
             throw error;
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    }
+
+    /**
+     * Diagnose browser-level network failures where no API response is available.
+     */
+    async getNetworkErrorMessage() {
+        try {
+            const response = await fetch('/api/health', { cache: 'no-store' });
+            if (response.ok) {
+                return `The converter is online, but the upload did not complete. On Vercel, try a file under ${this.maxFileSizeLabel}; larger files can be rejected before Flask responds.`;
+            }
+
+            return `The converter health check returned ${response.status}. Please redeploy and check the Vercel function logs.`;
+        } catch (_) {
+            return 'Could not reach the converter API. Please check the Vercel deployment status and function logs.';
         }
     }
 

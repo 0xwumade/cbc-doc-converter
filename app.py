@@ -34,7 +34,16 @@ CORS(app)
 # Configuration
 UPLOAD_FOLDER = tempfile.gettempdir()
 ALLOWED_EXTENSIONS = {'pdf', 'docx', 'doc'}
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+
+try:
+    configured_max_file_size_mb = int(os.environ.get('MAX_FILE_SIZE_MB', ''))
+except ValueError:
+    configured_max_file_size_mb = 0
+
+# Vercel serverless requests have a much smaller practical body limit than a
+# long-running Flask server, so keep deployed uploads below that ceiling.
+MAX_FILE_SIZE_MB = configured_max_file_size_mb or (4 if os.environ.get('VERCEL') else 50)
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
@@ -168,6 +177,8 @@ def get_config():
     return jsonify({
         'config': config_data,
         'maxFileSize': MAX_FILE_SIZE,
+        'maxFileSizeMb': MAX_FILE_SIZE_MB,
+        'platform': 'vercel' if os.environ.get('VERCEL') else 'local',
         'supportedFormats': {
             'pdf-to-word': 'Convert PDF to Word (DOCX)',
             'word-to-pdf': 'Convert Word to PDF'
